@@ -263,8 +263,6 @@ def run_app():
     st.title("🧠 Resource Allocation Using Multimodal AI & Misinformation Modeling in Healthcare")
     st.caption("The UI below balances multimodal data interaction (audio, image, physiological signals) and real-time simulation of misinformation spread to prioritize patients for limited care resources.")
 
-
-
     # Model status check
     if not check_pretrained_model():
         st.sidebar.error("❌ Pretrained model not found or invalid!")
@@ -292,13 +290,48 @@ def run_app():
 
     # Uploaders (optional)
     st.subheader("📥 Upload Audio & Image (Optional)")
-    up_col1, up_col2, up_col3 = st.columns([1,1,1])
-    with up_col1:
-        st.file_uploader("Upload Audio Files", type=["wav", "mp3", "flac"], accept_multiple_files=True, key="audio_uploads")
-    with up_col2:
-        st.file_uploader("Upload Image Files", type=["jpg", "jpeg", "png", "bmp", "tif", "tiff"], accept_multiple_files=True, key="image_uploads")
-    with up_col3:
-        st.number_input("n Samples", min_value=1, value=10, step=1, key="n_samples_ui")
+    st.markdown(
+        """
+        <style>
+        /* Tighten inner cell padding and add header row vibe */
+        .cell-header { font-weight: 700; border-bottom: 1px solid #bbb; margin: -0.25rem -0.25rem 0.5rem -0.25rem; padding: 0.25rem; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    with st.container(border=True):
+        up_col1, up_col2, up_col3 = st.columns([1,1,1])
+        with up_col1:
+            with st.container(border=True):
+                st.markdown('<div class="cell-header">Upload Audio Files</div>', unsafe_allow_html=True)
+                st.file_uploader(
+                    "Upload Audio Files",
+                    type=["wav", "mp3", "flac"],
+                    accept_multiple_files=True,
+                    key="audio_uploads",
+                    label_visibility="collapsed",
+                )
+        with up_col2:
+            with st.container(border=True):
+                st.markdown('<div class="cell-header">Upload Image Files</div>', unsafe_allow_html=True)
+                st.file_uploader(
+                    "Upload Image Files",
+                    type=["jpg", "jpeg", "png", "bmp", "tif", "tiff"],
+                    accept_multiple_files=True,
+                    key="image_uploads",
+                    label_visibility="collapsed",
+                )
+        with up_col3:
+            with st.container(border=True):
+                st.markdown('<div class="cell-header">n Samples ▼</div>', unsafe_allow_html=True)
+                st.number_input(
+                    "n Samples",
+                    min_value=1,
+                    value=10,
+                    step=1,
+                    key="n_samples_ui",
+                    label_visibility="collapsed",
+                )
 
     # Preview uploaded images with MRI/PET caption heuristic
     uploaded_images = st.session_state.get("image_uploads")
@@ -450,12 +483,6 @@ def run_app():
     nx.draw(G_net_, pos, node_color=node_colors, node_size=20, with_labels=False, ax=ax_net)
     st.pyplot(fig_net, use_container_width=True)
     plt.close(fig_net)
-
-
-    
-
-
-
 
 if __name__ == "__main__":
     # If running under Streamlit
