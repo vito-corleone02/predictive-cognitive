@@ -87,14 +87,6 @@ def first_existing(path_list: List[str]) -> Optional[str]:
             return p
     return None
 
-
-
-
-
-
-
-
-
 # =============================================================================
 # 2) FEATURE LOADING (Same approach as demo_inference.py)
 # =============================================================================
@@ -308,6 +300,23 @@ def run_app():
     with up_col3:
         st.number_input("n Samples", min_value=1, value=10, step=1, key="n_samples_ui")
 
+    # Preview uploaded images with MRI/PET caption heuristic
+    uploaded_images = st.session_state.get("image_uploads")
+    if uploaded_images:
+        st.subheader("🖼️ MRI/PET Uploaded Image Preview")
+        ncols = min(4, len(uploaded_images))
+        cols = st.columns(ncols)
+        for idx, img_file in enumerate(uploaded_images):
+            fname_lower = getattr(img_file, "name", "").lower()
+            if "mri" in fname_lower:
+                label = "MRI image"
+            elif "pet" in fname_lower:
+                label = "PET image"
+            else:
+                label = "Image"
+            with cols[idx % ncols]:
+                st.image(img_file, caption=label, use_container_width=True)
+
     # Run inference button
     if check_pretrained_model():
         if st.button("▶️ Run Inference"):
@@ -385,6 +394,24 @@ def run_app():
             num_features=min(10, len(arts["feat_names"]))
         )
         fig = lime_exp.as_pyplot_figure()
+        
+        # Apply custom color scheme to LIME chart
+        custom_colors = ['#003A6B', '#1B5886', '#3776A1', '#5293BB', '#6EB1D6', '#89CFF1']
+        
+        # Get the axes and modify colors
+        ax = fig.gca()
+        bars = ax.patches
+        
+        # Apply custom colors to bars (cycling through the palette)
+        for i, bar in enumerate(bars):
+            color_idx = i % len(custom_colors)
+            bar.set_color(custom_colors[color_idx])
+            bar.set_alpha(0.8)  # Add some transparency for better aesthetics
+        
+        # Update the figure style
+        fig.patch.set_facecolor('white')
+        ax.set_facecolor('#f8f9fa')  # Light background
+        
         st.pyplot(fig, use_container_width=True)
         plt.close(fig)
     else:
