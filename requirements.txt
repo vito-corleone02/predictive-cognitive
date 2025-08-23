@@ -52,7 +52,7 @@ pycparser==2.22
 pydeck==0.9.1
 pyparsing==3.2.3
 PySocks==1.7.1
-python-dateutil==2.9.0.post1
+python-dateutil==2.9.0.post0
 python-slugify==8.0.4
 pytz==2025.2
 referencing==0.36.2
@@ -84,6 +84,7 @@ tzdata==2025.2
 urllib3==2.5.0
 watchdog==6.0.0
 webencodings==0.5.1
+
 
 
 
