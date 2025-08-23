@@ -10,6 +10,8 @@ import numpy as np
 import pandas as pd
 import networkx as nx
 import matplotlib.pyplot as plt
+from PIL import Image
+import cv2
 
 # Optional Streamlit import for GUI mode only
 try:
@@ -17,11 +19,23 @@ try:
 except Exception:
     st = None
 
-
+# Audio processing
+try:
+    import librosa
+except ImportError:
+    librosa = None
+    print("Warning: librosa not available. Audio processing will be disabled.")
 
 # Explainability
 import shap
 from lime.lime_tabular import LimeTabularExplainer
+
+# Machine learning utilities
+try:
+    from sklearn.metrics.pairwise import cosine_similarity
+except ImportError:
+    cosine_similarity = None
+    print("Warning: sklearn not available. Some audio analysis features will be disabled.")
 
 
 
@@ -40,10 +54,160 @@ MODALITIES = [
     "gaze_conf",
     "pose_conf",
     "text",
-    # New image modalities (optional, only used if features are prepared)
-    "mri",
-    "pet",
 ]
+
+
+
+# =============================================================================
+# ALZHEIMER'S DISEASE IMAGE PROCESSING
+# =============================================================================
+def load_and_preprocess_image(image_path: str, target_size: Tuple[int, int] = (224, 224)) -> np.ndarray:
+    """Load and preprocess an image for Alzheimer's disease classification."""
+    try:
+        # Load image
+        if image_path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
+            img = cv2.imread(image_path)
+            if img is None:
+                # Try PIL as fallback
+                pil_img = Image.open(image_path)
+                img = np.array(pil_img)
+                if len(img.shape) == 3 and img.shape[2] == 3:
+                    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                elif len(img.shape) == 2:
+                    img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        else:
+            # Handle .PNG files (case sensitive)
+            img = cv2.imread(image_path)
+            if img is None:
+                return None
+
+        if img is None:
+            return None
+
+        # Resize
+        img = cv2.resize(img, target_size)
+
+        # Normalize to [0, 1]
+        img = img.astype(np.float32) / 255.0
+
+        # Convert to grayscale if it's a 3-channel image (for MRI/PET)
+        if len(img.shape) == 3:
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            img = np.expand_dims(img, axis=-1)
+
+        return img
+
+    except Exception as e:
+        print(f"Error processing image {image_path}: {e}")
+        return None
+
+def extract_image_features(img: np.ndarray, target_features: int = 50436) -> np.ndarray:
+    """Extract features from preprocessed image with padding/truncation to match target dimensions."""
+    try:
+        # Flatten the image
+        flattened = img.flatten()
+        
+        # Basic statistical features
+        mean_val = np.mean(img)
+        std_val = np.std(img)
+        min_val = np.min(img)
+        max_val = np.max(img)
+        
+        # Histogram features (simplified)
+        hist, _ = np.histogram(img.flatten(), bins=10, range=(0, 1))
+        hist = hist / np.sum(hist)  # Normalize
+        
+        # Combine all features
+        all_features = np.concatenate([
+            flattened,
+            [mean_val, std_val, min_val, max_val],
+            hist
+        ])
+        
+        # Pad or truncate to match expected feature dimensions
+        if all_features.size < target_features:
+            # Pad with zeros if we have fewer features
+            padding = np.zeros(target_features - all_features.size, dtype=np.float32)
+            all_features = np.concatenate([all_features, padding])
+        elif all_features.size > target_features:
+            # Truncate if we have more features
+            all_features = all_features[:target_features]
+        
+        return all_features.astype(np.float32)
+    except Exception as e:
+        print(f"Error extracting features: {e}")
+        return np.array([])
+
+def check_alzheimer_model() -> bool:
+    """Check if Alzheimer model exists and is valid."""
+    model_path = os.path.join("artifacts", "alzheimer_classifier.pkl")
+    if not os.path.exists(model_path):
+        return False
+    try:
+        with open(model_path, "rb") as f:
+            model_artifact = pickle.load(f)
+        required_keys = ["classifier", "scaler", "label_encoder", "classes"]
+        if not all(key in model_artifact for key in required_keys):
+            return False
+        
+        # Check if scaler has the expected feature count
+        scaler = model_artifact["scaler"]
+        if hasattr(scaler, 'n_features_in_'):
+            print(f"Alzheimer model expects {scaler.n_features_in_} features")
+        
+        return True
+    except Exception:
+        return False
+
+def load_alzheimer_model() -> Dict[str, Any]:
+    """Load the trained Alzheimer classifier model."""
+    model_path = os.path.join("artifacts", "alzheimer_classifier.pkl")
+    with open(model_path, "rb") as f:
+        model_artifact = pickle.load(f)
+    return model_artifact
+
+def classify_alzheimer_image(image_file, alzheimer_model: Dict[str, Any]) -> Tuple[str, float, np.ndarray]:
+    """Classify an uploaded image using the Alzheimer model."""
+    try:
+        # Save uploaded file temporarily
+        temp_path = f"temp_upload_{random.randint(1000, 9999)}.png"
+        with open(temp_path, "wb") as f:
+            f.write(image_file.getbuffer())
+        
+        # Load and preprocess image
+        img = load_and_preprocess_image(temp_path)
+        if img is None:
+            os.remove(temp_path)
+            return "Error: Could not load image", 0.0, np.array([])
+        
+        # Extract features with proper dimension matching
+        target_features = alzheimer_model["scaler"].n_features_in_
+        features = extract_image_features(img, target_features=target_features)
+        if features.size == 0:
+            os.remove(temp_path)
+            return "Error: Could not extract features", 0.0, np.array([])
+        
+        # Scale features
+        scaler = alzheimer_model["scaler"]
+        features_scaled = scaler.transform(features.reshape(1, -1))
+        
+        # Predict
+        classifier = alzheimer_model["classifier"]
+        prediction = classifier.predict(features_scaled)[0]
+        probabilities = classifier.predict_proba(features_scaled)[0]
+        
+        # Get class name and confidence
+        label_encoder = alzheimer_model["label_encoder"]
+        class_name = label_encoder.inverse_transform([prediction])[0]
+        confidence = np.max(probabilities)
+        
+        # Clean up temp file
+        os.remove(temp_path)
+        
+        return class_name, confidence, img
+        
+    except Exception as e:
+        return f"Error: {str(e)}", 0.0, np.array([])
 
 
 
@@ -204,6 +368,93 @@ def run_simple_inference() -> Dict[str, Any]:
 # =============================================================================
 # 4) PHYSIOLOGICAL MARKERS SIMULATION
 # =============================================================================
+
+# --- Audio MFCC features ---
+def extract_mfcc_features(audio_files):
+    """Extract MFCC features from audio files."""
+    if librosa is None:
+        return None, "librosa not available for audio processing"
+    
+    try:
+        mfcc_feats = []
+        file_names = []
+        
+        for file in audio_files:
+            # Save uploaded file temporarily
+            temp_path = f"temp_audio_{random.randint(1000, 9999)}.wav"
+            with open(temp_path, "wb") as f:
+                f.write(file.getbuffer())
+            
+            try:
+                y, sr = librosa.load(temp_path, sr=None)
+                mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
+                mfcc_mean = np.mean(mfcc, axis=1)
+                mfcc_feats.append(mfcc_mean)
+                file_names.append(file.name)
+                
+                # Clean up temp file
+                os.remove(temp_path)
+                
+            except Exception as e:
+                print(f"Error processing audio file {file.name}: {e}")
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                continue
+        
+        if not mfcc_feats:
+            return None, "No valid audio files could be processed"
+        
+        return np.array(mfcc_feats), file_names
+        
+    except Exception as e:
+        return None, f"Error in MFCC extraction: {str(e)}"
+
+def analyze_audio_features(mfcc_features, file_names):
+    """Analyze extracted MFCC features and create results similar to inference results."""
+    try:
+        if mfcc_features is None or mfcc_features.size == 0:
+            return None
+        
+        # Calculate basic statistics for each feature
+        feature_stats = {
+            'mean': np.mean(mfcc_features, axis=0),
+            'std': np.std(mfcc_features, axis=0),
+            'min': np.min(mfcc_features, axis=0),
+            'max': np.max(mfcc_features, axis=0)
+        }
+        
+        # Create feature names for MFCC coefficients
+        mfcc_feature_names = [f"MFCC_{i+1}" for i in range(mfcc_features.shape[1])]
+        
+        # Calculate similarity matrix between audio files
+        if cosine_similarity is None:
+            print("Warning: sklearn not available for cosine similarity. Skipping audio similarity matrix.")
+            similarity_matrix = None
+        else:
+            similarity_matrix = cosine_similarity(mfcc_features)
+        
+        # Create a summary dataframe
+        summary_df = pd.DataFrame({
+            'File Name': file_names,
+            'MFCC_Mean': [np.mean(feat) for feat in mfcc_features],
+            'MFCC_Std': [np.std(feat) for feat in mfcc_features],
+            'MFCC_Range': [np.max(feat) - np.min(feat) for feat in mfcc_features]
+        })
+        
+        return {
+            'mfcc_features': mfcc_features,
+            'file_names': file_names,
+            'feature_names': mfcc_feature_names,
+            'feature_stats': feature_stats,
+            'similarity_matrix': similarity_matrix,
+            'summary_df': summary_df,
+            'total_files': len(file_names),
+            'mfcc_dimensions': mfcc_features.shape[1]
+        }
+        
+    except Exception as e:
+        return None
+
 def simulate_physiological_markers(n_samples, breathing_range=(12, 20), tapping_range=(1, 5), heart_rate_range=(60, 100)):
     """
     Simulate physiological markers with customizable ranges.
@@ -270,6 +521,20 @@ def run_app():
     else:
         st.sidebar.success("✅ Pretrained model ready!")
     
+    # Alzheimer model status check
+    if not check_alzheimer_model():
+        st.sidebar.error("❌ Alzheimer model not found or invalid!")
+        st.sidebar.info("Please ensure 'artifacts/alzheimer_classifier.pkl' exists and contains a valid model.")
+    else:
+        st.sidebar.success("✅ Alzheimer model ready!")
+    
+    # Audio processing status check
+    if librosa is None:
+        st.sidebar.warning("⚠️ Audio processing disabled!")
+        st.sidebar.info("Install librosa for audio file analysis: pip install librosa")
+    else:
+        st.sidebar.success("✅ Audio processing ready!")
+    
     # Sidebar controls (misinfo + capacity)
     st.sidebar.header("Simulation & Allocation Controls")
     trans_prob = st.sidebar.slider("Transmission Probability", 0.0, 1.0, 0.2, 0.01)
@@ -304,13 +569,37 @@ def run_app():
         with up_col1:
             with st.container(border=True):
                 st.markdown('<div class="cell-header">Upload Audio Files</div>', unsafe_allow_html=True)
-                st.file_uploader(
+                audio_files = st.file_uploader(
                     "Upload Audio Files",
                     type=["wav", "mp3", "flac"],
                     accept_multiple_files=True,
                     key="audio_uploads",
                     label_visibility="collapsed",
                 )
+                # Add audio processing button
+                if audio_files and len(audio_files) > 0:
+                    if st.button("🔊 Process Audio Files", key="process_audio"):
+                        with st.spinner("Processing audio files..."):
+                            if librosa is None:
+                                st.error("❌ librosa not available. Please install it for audio processing.")
+                            else:
+                                # Extract MFCC features
+                                mfcc_features, file_names = extract_mfcc_features(audio_files)
+                                
+                                if mfcc_features is not None:
+                                    # Analyze features
+                                    audio_results = analyze_audio_features(mfcc_features, file_names)
+                                    if audio_results:
+                                        st.session_state["audio_results"] = audio_results
+                                        st.success(f"✅ Processed {len(audio_files)} audio files!")
+                                    else:
+                                        st.error("❌ Failed to analyze audio features")
+                                else:
+                                    st.error(f"❌ Audio processing failed: {file_names}")
+                else:
+                    # Clear audio results when no audio files are uploaded
+                    if "audio_results" in st.session_state:
+                        del st.session_state["audio_results"]
         with up_col2:
             with st.container(border=True):
                 st.markdown('<div class="cell-header">Upload Image Files</div>', unsafe_allow_html=True)
@@ -333,23 +622,67 @@ def run_app():
                     label_visibility="collapsed",
                 )
 
-    # Preview uploaded images with MRI/PET caption heuristic
-    uploaded_images = st.session_state.get("image_uploads")
-    if uploaded_images:
-        st.subheader("🖼️ MRI/PET Uploaded Image Preview")
-        ncols = min(4, len(uploaded_images))
-        cols = st.columns(ncols)
-        for idx, img_file in enumerate(uploaded_images):
-            fname_lower = getattr(img_file, "name", "").lower()
-            if "mri" in fname_lower:
-                label = "MRI image"
-            elif "pet" in fname_lower:
-                label = "PET image"
-            else:
-                label = "Image"
-            with cols[idx % ncols]:
-                st.image(img_file, caption=label, use_container_width=True)
 
+    # Alzheimer Image Classification
+    if check_alzheimer_model():
+        st.subheader("🧠 Alzheimer's Disease Image Classification")
+        
+        # Load Alzheimer model
+        if "alzheimer_model" not in st.session_state:
+            with st.spinner("Loading Alzheimer model..."):
+                alzheimer_model = load_alzheimer_model()
+                st.session_state["alzheimer_model"] = alzheimer_model
+        
+        # Process uploaded images
+        if "image_uploads" in st.session_state and st.session_state["image_uploads"]:
+            st.write("**Processing uploaded images...**")
+            
+            for i, uploaded_file in enumerate(st.session_state["image_uploads"]):
+                with st.container(border=True):
+                    col1, col2 = st.columns([1, 2])
+                    
+                    with col1:
+                        st.write(f"**Image {i+1}:** {uploaded_file.name}")
+                        # Display the uploaded image
+                        st.image(uploaded_file, caption=f"Uploaded: {uploaded_file.name}", use_container_width=True)
+                    
+                    with col2:
+                        if st.button(f"🔍 Classify Image {i+1}", key=f"classify_{i}"):
+                            with st.spinner("Classifying image..."):
+                                alzheimer_model = st.session_state["alzheimer_model"]
+                                prediction, confidence, processed_img = classify_alzheimer_image(uploaded_file, alzheimer_model)
+                                
+                                if prediction.startswith("Error"):
+                                    st.error(prediction)
+                                else:
+                                    # Display results - only prediction
+                                    st.success(f"**Prediction:** {prediction}")
+        else:
+            st.info("Upload images above to classify them for Alzheimer's disease.")
+    else:
+        st.warning("Alzheimer model not available. Cannot perform image classification.")
+    
+    # Audio Analysis Results
+    if "audio_results" in st.session_state:
+        st.subheader("🎵 Audio Analysis Results")
+        audio_results = st.session_state["audio_results"]
+        
+        # Display basic info
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Total Files", audio_results["total_files"])
+        with col2:
+            st.metric("MFCC Dimensions", audio_results["mfcc_dimensions"])
+        with col3:
+            st.metric("Features per File", len(audio_results["feature_names"]))
+        with col4:
+            avg_mfcc = np.mean(audio_results["mfcc_features"])
+            st.metric("Avg MFCC Value", f"{avg_mfcc:.3f}")
+        
+        # Display summary table
+        st.write("**Audio Files Summary:**")
+        st.dataframe(audio_results["summary_df"], use_container_width=True)
+    
     # Run inference button
     if check_pretrained_model():
         if st.button("▶️ Run Inference"):
@@ -359,7 +692,7 @@ def run_app():
     else:
         st.button("▶️ Run Inference", disabled=True)
         st.warning("Cannot run inference: Pretrained model not available.")
-            
+    
     # Physiological markers simulation
     if st.button("🧬 Simulate Physiological Data"):
         n_samples = st.session_state.get("n_samples_ui", 10)
@@ -465,9 +798,9 @@ def run_app():
     # Misinformation Spread Over Time
     st.subheader("📉 Misinformation Spread Over Time")
     fig_misinfo, ax_misinfo = plt.subplots()
-    ax_misinfo.plot(S_list_, label="Susceptible")
-    ax_misinfo.plot(I_list_, label="Infected")
-    ax_misinfo.plot(R_list_, label="Recovered")
+    ax_misinfo.plot(S_list_, label="Susceptible", color='#003A6B', linewidth=2)
+    ax_misinfo.plot(I_list_, label="Infected", color='#3776A1', linewidth=2)
+    ax_misinfo.plot(R_list_, label="Recovered", color='#89CFF1', linewidth=2)
     ax_misinfo.legend()
     ax_misinfo.set_xlabel("Step")
     ax_misinfo.set_ylabel("Nodes")
@@ -478,9 +811,9 @@ def run_app():
     st.subheader("🌐 Final Network State (Social Network Visualization)")
     fig_net, ax_net = plt.subplots(figsize=(7, 5))
     pos = nx.spring_layout(G_net_, seed=42)
-    c_map = {'S': 'blue', 'I': 'red', 'R': 'green'}
+    c_map = {'S': '#003A6B', 'I': '#1B5886', 'R': '#3776A1'}
     node_colors = [c_map[G_net_.nodes[n]['state']] for n in G_net_.nodes()]
-    nx.draw(G_net_, pos, node_color=node_colors, node_size=20, with_labels=False, ax=ax_net)
+    nx.draw(G_net_, pos, node_color=node_colors, node_size=20, with_labels=False, ax=ax_net, edge_color='gray')
     st.pyplot(fig_net, use_container_width=True)
     plt.close(fig_net)
 
@@ -502,6 +835,8 @@ if __name__ == "__main__":
         parser.add_argument("--heart-rate-min", type=float, default=60.0, help="Minimum heart rate (bpm)")
         parser.add_argument("--heart-rate-max", type=float, default=100.0, help="Maximum heart rate (bpm)")
         parser.add_argument("--physio-samples", type=int, default=10, help="Number of physiological samples to generate")
+        parser.add_argument("--alzheimer-image", type=str, help="Path to image file for Alzheimer classification")
+        parser.add_argument("--audio-files", nargs="+", help="Paths to audio files for MFCC analysis")
 
         args = parser.parse_args()
 
@@ -516,6 +851,13 @@ if __name__ == "__main__":
 
         # Simple inference example (same as demo_inference.py)
         print("\n=== SIMPLE INFERENCE EXAMPLE ===")
+        print("Usage examples:")
+        print("  - Basic inference: python streamlit_inference.py --mode cli")
+        print("  - With audio files: python streamlit_inference.py --mode cli --audio-files file1.wav file2.mp3")
+        print("  - With Alzheimer image: python streamlit_inference.py --mode cli --alzheimer-image image.png")
+        print("  - With custom parameters: python streamlit_inference.py --mode cli --capacity 20 --steps 30")
+        print()
+        
         try:
             # Example: predict for participants 300 and 301 in the "test" split
             participant_ids = [300, 301]
@@ -570,6 +912,109 @@ if __name__ == "__main__":
         print(f"Tapping range: {args.tapping_min}-{args.tapping_max} taps/sec")
         print(f"Heart rate range: {args.heart_rate_min}-{args.heart_rate_max} bpm")
         print(f"Sample means - Breathing: {np.mean(physio_data[:, 0]):.2f}, Tapping: {np.mean(physio_data[:, 1]):.2f}, HR: {np.mean(physio_data[:, 2]):.2f}")
+
+        # Alzheimer's disease classification (CLI mode)
+        if args.alzheimer_image:
+            print(f"\n=== ALZHEIMER'S DISEASE CLASSIFICATION ===")
+            if not check_alzheimer_model():
+                print("❌ Error: Alzheimer model not found or invalid!")
+                print("Please ensure 'artifacts/alzheimer_classifier.pkl' exists and contains a valid model.")
+            else:
+                try:
+                    alzheimer_model = load_alzheimer_model()
+                    print(f"✅ Loaded Alzheimer model with classes: {alzheimer_model['classes']}")
+                    
+                    # Check if image file exists
+                    if not os.path.exists(args.alzheimer_image):
+                        print(f"❌ Error: Image file '{args.alzheimer_image}' not found!")
+                    else:
+                        # Load and classify image
+                        img = load_and_preprocess_image(args.alzheimer_image)
+                        if img is None:
+                            print(f"❌ Error: Could not load image '{args.alzheimer_image}'")
+                        else:
+                            # Get target feature count from model
+                            target_features = alzheimer_model["scaler"].n_features_in_
+                            features = extract_image_features(img, target_features=target_features)
+                            if features.size == 0:
+                                print(f"❌ Error: Could not extract features from image")
+                            else:
+                                # Scale features and predict
+                                scaler = alzheimer_model["scaler"]
+                                features_scaled = scaler.transform(features.reshape(1, -1))
+                                
+                                classifier = alzheimer_model["classifier"]
+                                prediction = classifier.predict(features_scaled)[0]
+                                probabilities = classifier.predict_proba(features_scaled)[0]
+                                
+                                # Get class name and confidence
+                                label_encoder = alzheimer_model["label_encoder"]
+                                class_name = label_encoder.inverse_transform([prediction])[0]
+                                confidence = np.max(probabilities)
+                                
+                                print(f"📸 Image: {args.alzheimer_image}")
+                                print(f"🔍 Prediction: {class_name}")
+                                print(f"📊 Confidence: {confidence:.2%}")
+                                print(f"📈 All probabilities:")
+                                for i, (cls, prob) in enumerate(zip(alzheimer_model["classes"], probabilities)):
+                                    marker = "✅" if cls == class_name else "  "
+                                    print(f"   {marker} {cls}: {prob:.2%}")
+                                
+                except Exception as e:
+                    print(f"❌ Alzheimer classification failed: {e}")
+
+        # Audio processing (CLI mode)
+        if args.audio_files:
+            print(f"\n=== AUDIO MFCC ANALYSIS ===")
+            if librosa is None:
+                print("❌ Error: librosa not available for audio processing!")
+                print("Please install librosa: pip install librosa")
+            else:
+                try:
+                    # Create mock file objects for CLI processing
+                    class MockAudioFile:
+                        def __init__(self, path):
+                            self.path = path
+                            self.name = os.path.basename(path)
+                        
+                        def getbuffer(self):
+                            with open(self.path, 'rb') as f:
+                                return f.read()
+                    
+                    mock_audio_files = [MockAudioFile(path) for path in args.audio_files]
+                    
+                    # Extract MFCC features
+                    mfcc_features, file_names = extract_mfcc_features(mock_audio_files)
+                    
+                    if mfcc_features is not None:
+                        # Analyze features
+                        audio_results = analyze_audio_features(mfcc_features, file_names)
+                        if audio_results:
+                            print(f"✅ Successfully processed {len(args.audio_files)} audio files!")
+                            print(f"📊 MFCC dimensions: {audio_results['mfcc_dimensions']}")
+                            print(f"📈 Features per file: {len(audio_results['feature_names'])}")
+                            
+                            # Display summary
+                            print(f"\n📋 Audio Files Summary:")
+                            print(audio_results['summary_df'].to_string(index=False))
+                            
+                            # Save results
+                            os.makedirs("artifacts", exist_ok=True)
+                            audio_results_path = os.path.join("artifacts", "audio_analysis_results.csv")
+                            audio_results['summary_df'].to_csv(audio_results_path, index=False)
+                            print(f"💾 Saved audio analysis results to: {audio_results_path}")
+                            
+                            # Save MFCC features
+                            mfcc_path = os.path.join("artifacts", "audio_mfcc_features.npy")
+                            np.save(mfcc_path, audio_results['mfcc_features'])
+                            print(f"💾 Saved MFCC features to: {mfcc_path}")
+                        else:
+                            print("❌ Failed to analyze audio features")
+                    else:
+                        print(f"❌ Audio processing failed: {file_names}")
+                        
+                except Exception as e:
+                    print(f"❌ Audio processing failed: {e}")
 
         # Save heatmap
         os.makedirs("artifacts", exist_ok=True)
