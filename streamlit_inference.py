@@ -11,7 +11,14 @@ import pandas as pd
 import networkx as nx
 import matplotlib.pyplot as plt
 from PIL import Image
-import cv2
+
+# Conditional OpenCV import for cloud compatibility
+try:
+    import cv2
+    OPENCV_AVAILABLE = True
+except ImportError:
+    OPENCV_AVAILABLE = False
+    print("Warning: OpenCV (cv2) not available. Using PIL for image processing.")
 
 # Optional Streamlit import for GUI mode only
 try:
@@ -66,33 +73,68 @@ def load_and_preprocess_image(image_path: str, target_size: Tuple[int, int] = (2
     try:
         # Load image
         if image_path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
-            img = cv2.imread(image_path)
-            if img is None:
-                # Try PIL as fallback
+            if OPENCV_AVAILABLE:
+                img = cv2.imread(image_path)
+                if img is None:
+                    # Try PIL as fallback
+                    pil_img = Image.open(image_path)
+                    img = np.array(pil_img)
+                    if len(img.shape) == 3 and img.shape[2] == 3:
+                        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                    elif len(img.shape) == 2:
+                        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+            else:
+                # PIL fallback
                 pil_img = Image.open(image_path)
                 img = np.array(pil_img)
+                # Convert RGB to BGR if needed (OpenCV format)
                 if len(img.shape) == 3 and img.shape[2] == 3:
-                    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                    img = img[:, :, ::-1]  # RGB to BGR
                 elif len(img.shape) == 2:
-                    img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+                    img = np.stack([img] * 3, axis=-1)  # Grayscale to 3-channel
         else:
             # Handle .PNG files (case sensitive)
-            img = cv2.imread(image_path)
-            if img is None:
-                return None
+            if OPENCV_AVAILABLE:
+                img = cv2.imread(image_path)
+                if img is None:
+                    return None
+            else:
+                # PIL fallback
+                try:
+                    pil_img = Image.open(image_path)
+                    img = np.array(pil_img)
+                    # Convert RGB to BGR if needed (OpenCV format)
+                    if len(img.shape) == 3 and img.shape[2] == 3:
+                        img = img[:, :, ::-1]  # RGB to BGR
+                    elif len(img.shape) == 2:
+                        img = np.stack([img] * 3, axis=-1)  # Grayscale to 3-channel
+                except Exception:
+                    return None
 
         if img is None:
             return None
 
         # Resize
-        img = cv2.resize(img, target_size)
+        if OPENCV_AVAILABLE:
+            img = cv2.resize(img, target_size)
+        else:
+            # PIL resize
+            pil_img = Image.fromarray(img)
+            pil_img = pil_img.resize(target_size, Image.Resampling.LANCZOS)
+            img = np.array(pil_img)
 
         # Normalize to [0, 1]
         img = img.astype(np.float32) / 255.0
 
         # Convert to grayscale if it's a 3-channel image (for MRI/PET)
         if len(img.shape) == 3:
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            if OPENCV_AVAILABLE:
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            else:
+                # PIL grayscale conversion
+                pil_img = Image.fromarray((img * 255).astype(np.uint8))
+                pil_img = pil_img.convert('L')
+                img = np.array(pil_img) / 255.0
             img = np.expand_dims(img, axis=-1)
 
         return img
@@ -528,6 +570,13 @@ def run_app():
     else:
         st.sidebar.success("✅ Alzheimer model ready!")
     
+    # OpenCV status check
+    if OPENCV_AVAILABLE:
+        st.sidebar.success("✅ OpenCV ready!")
+    else:
+        st.sidebar.warning("⚠️ OpenCV not available!")
+        st.sidebar.info("Using PIL fallback for image processing. Some advanced image features may be limited.")
+    
     # Audio processing status check
     if librosa is None:
         st.sidebar.warning("⚠️ Audio processing disabled!")
@@ -626,6 +675,10 @@ def run_app():
     # Alzheimer Image Classification
     if check_alzheimer_model():
         st.subheader("🧠 Alzheimer's Disease Image Classification")
+        
+        # Show OpenCV status for image processing
+        if not OPENCV_AVAILABLE:
+            st.info("ℹ️ **Note:** OpenCV is not available. Using PIL for image processing. This may affect some advanced image features.")
         
         # Load Alzheimer model
         if "alzheimer_model" not in st.session_state:
